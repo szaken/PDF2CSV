@@ -390,25 +390,23 @@ function normalizeDecision(raw: unknown): ChunkDecision {
     throw new Error("Missing keep array in model JSON response.");
   }
 
-  const keep: KeepDecision[] = parsed.keep
-    .map((item) => {
-      const record = item as Record<string, unknown>;
-      if (typeof record.id !== "string" || !record.id.trim()) {
-        return null;
-      }
-      return {
-        id: record.id,
-        section_heading:
-          typeof record.section_heading === "string"
-            ? record.section_heading.trim()
-            : undefined,
-        note:
-          typeof record.note === "string" ? record.note.trim() : undefined,
-        possible_boilerplate: Boolean(record.possible_boilerplate),
-        confidence: clampConfidence(record.confidence),
-      };
-    })
-    .filter((item): item is KeepDecision => item !== null);
+  const keep: KeepDecision[] = [];
+  for (const item of parsed.keep) {
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || !record.id.trim()) {
+      continue;
+    }
+    keep.push({
+      id: record.id,
+      section_heading:
+        typeof record.section_heading === "string"
+          ? record.section_heading.trim()
+          : undefined,
+      note: typeof record.note === "string" ? record.note.trim() : undefined,
+      possible_boilerplate: Boolean(record.possible_boilerplate),
+      confidence: clampConfidence(record.confidence),
+    });
+  }
 
   const warnings = Array.isArray(parsed.warnings)
     ? parsed.warnings
@@ -425,29 +423,27 @@ function normalizeVisionDecision(raw: unknown): VisionPageDecision {
     throw new Error("Missing paragraphs array in vision JSON response.");
   }
 
-  const paragraphs: VisionParagraphDecision[] = parsed.paragraphs
-    .map((item) => {
-      const record = item as Record<string, unknown>;
-      if (typeof record.text !== "string") {
-        return null;
-      }
-      const text = record.text.trim();
-      if (!text) {
-        return null;
-      }
-      return {
-        text,
-        section_heading:
-          typeof record.section_heading === "string"
-            ? record.section_heading.trim()
-            : undefined,
-        note:
-          typeof record.note === "string" ? record.note.trim() : undefined,
-        possible_boilerplate: Boolean(record.possible_boilerplate),
-        confidence: clampConfidence(record.confidence),
-      };
-    })
-    .filter((item): item is VisionParagraphDecision => item !== null);
+  const paragraphs: VisionParagraphDecision[] = [];
+  for (const item of parsed.paragraphs) {
+    const record = item as Record<string, unknown>;
+    if (typeof record.text !== "string") {
+      continue;
+    }
+    const text = record.text.trim();
+    if (!text) {
+      continue;
+    }
+    paragraphs.push({
+      text,
+      section_heading:
+        typeof record.section_heading === "string"
+          ? record.section_heading.trim()
+          : undefined,
+      note: typeof record.note === "string" ? record.note.trim() : undefined,
+      possible_boilerplate: Boolean(record.possible_boilerplate),
+      confidence: clampConfidence(record.confidence),
+    });
+  }
 
   const warnings = Array.isArray(parsed.warnings)
     ? parsed.warnings

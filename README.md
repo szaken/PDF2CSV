@@ -32,6 +32,10 @@ Browser-based app for extracting **main-body paragraphs** from one or more PDFs 
   - XLSX
 - Editable prompt templates in-app with `.md` import/export
 - Extraction quality knobs (minimum words, minimum alphabetic chars, short-paragraph sentence rule)
+- Token + cost estimator:
+  - tiktoken-based token counting for planned extraction requests
+  - Per-1M token pricing inputs (input/output) and optional batch discount
+  - Vision image token assumption for OCR fallback pages
 
 ## Project Structure
 
@@ -125,6 +129,22 @@ Available in `Extraction Quality Knobs` panel:
 - `Minimum alphabetic characters`
 - `Short paragraph word threshold`
 - `Require punctuation on short paragraphs`
+
+## Token + Cost Estimation
+
+In `2) Add PDFs and Run`, use `Token + Cost Estimate (tiktoken)`:
+
+- Enter `Input price / 1M tokens (USD)` and `Output price / 1M tokens (USD)` from your provider pricing page.
+- Set `Estimated output tokens per request`.
+- Set `Estimated vision image tokens per page` for scanned/image-only PDFs.
+- Optional: apply a batch discount percentage.
+- Click `Estimate Tokens + Cost` before running extraction.
+
+Notes:
+
+- Token estimates are based on planned extraction requests (text-chunk filtering + vision fallback pages).
+- OCR vision image costs are approximate and depend on your image-token assumption.
+- The estimator loads `js-tiktoken` at runtime from an ESM CDN; if unavailable, it falls back to rough token estimation.
 
 ## Output Columns
 

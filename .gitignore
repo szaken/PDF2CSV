@@ -6,3 +6,9 @@ node_modules/
 data/
 *.csv
 *.xlsx
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

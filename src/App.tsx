@@ -14,6 +14,11 @@ import {
   runExtraction,
   type OpenAiExtractionBatchManifest,
 } from "./lib/extractor";
+import {
+  estimateExtractionCost,
+  type CostEstimateResult,
+  type TokenCostSettings,
+} from "./lib/costEstimator";
 import { downloadCsv, downloadXlsx } from "./lib/exporters";
 import {
   DEFAULT_PROMPT_CONFIG,
@@ -56,6 +61,7 @@ interface SavedSettings {
   promptConfig: PromptConfig;
   qualitySettings: ExtractionQualitySettings;
   ollamaSettings: OllamaGenerationSettings;
+  tokenCostSettings: TokenCostSettings;
 }
 
 type OpenAiExecutionMode = "live" | "batch";
@@ -85,6 +91,14 @@ const SETTINGS_KEY = "pdf2csv.settings.v1";
 const BATCH_SESSION_KEY = "pdf2csv.openai-batch.v1";
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1/";
 const DEFAULT_OLLAMA_BASE_URL = "http://192.168.4.35:11434";
+const DEFAULT_TOKEN_COST_SETTINGS: TokenCostSettings = {
+  inputPricePer1M: 0,
+  outputPricePer1M: 0,
+  estimatedOutputTokensPerRequest: 450,
+  estimatedVisionImageTokens: 1100,
+  applyBatchDiscount: true,
+  batchDiscountPercent: 50,
+};
 
 function defaultBaseUrlForBackend(kind: BackendKind): string {
   return kind === "openai" ? DEFAULT_OPENAI_BASE_URL : DEFAULT_OLLAMA_BASE_URL;
@@ -138,6 +152,66 @@ function toNumber(value: string, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return parsed;
+}
+
+function sanitizeTokenCostSettings(
+  settings: Partial<TokenCostSettings> | undefined,
+): TokenCostSettings {
+  return {
+    inputPricePer1M: Math.max(
+      0,
+      toNumber(
+        String(settings?.inputPricePer1M ?? DEFAULT_TOKEN_COST_SETTINGS.inputPricePer1M),
+        DEFAULT_TOKEN_COST_SETTINGS.inputPricePer1M,
+      ),
+    ),
+    outputPricePer1M: Math.max(
+      0,
+      toNumber(
+        String(settings?.outputPricePer1M ?? DEFAULT_TOKEN_COST_SETTINGS.outputPricePer1M),
+        DEFAULT_TOKEN_COST_SETTINGS.outputPricePer1M,
+      ),
+    ),
+    estimatedOutputTokensPerRequest: Math.max(
+      0,
+      Math.round(
+        toNumber(
+          String(
+            settings?.estimatedOutputTokensPerRequest ??
+              DEFAULT_TOKEN_COST_SETTINGS.estimatedOutputTokensPerRequest,
+          ),
+          DEFAULT_TOKEN_COST_SETTINGS.estimatedOutputTokensPerRequest,
+        ),
+      ),
+    ),
+    estimatedVisionImageTokens: Math.max(
+      0,
+      Math.round(
+        toNumber(
+          String(
+            settings?.estimatedVisionImageTokens ??
+              DEFAULT_TOKEN_COST_SETTINGS.estimatedVisionImageTokens,
+          ),
+          DEFAULT_TOKEN_COST_SETTINGS.estimatedVisionImageTokens,
+        ),
+      ),
+    ),
+    applyBatchDiscount:
+      settings?.applyBatchDiscount ?? DEFAULT_TOKEN_COST_SETTINGS.applyBatchDiscount,
+    batchDiscountPercent: Math.min(
+      100,
+      Math.max(
+        0,
+        toNumber(
+          String(
+            settings?.batchDiscountPercent ??
+              DEFAULT_TOKEN_COST_SETTINGS.batchDiscountPercent,
+          ),
+          DEFAULT_TOKEN_COST_SETTINGS.batchDiscountPercent,
+        ),
+      ),
+    ),
+  };
 }
 
 function formatBytes(bytes: number): string {
@@ -289,12 +363,17 @@ export default function App(): JSX.Element {
   const [ollamaSettings, setOllamaSettings] = useState<OllamaGenerationSettings>(
     DEFAULT_OLLAMA_SETTINGS,
   );
+  const [tokenCostSettings, setTokenCostSettings] = useState<TokenCostSettings>(
+    DEFAULT_TOKEN_COST_SETTINGS,
+  );
 
   const [rows, setRows] = useState<ExtractionRow[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState<RunProgress | null>(null);
   const [batchJob, setBatchJob] = useState<PersistedOpenAiBatchJob | null>(null);
   const [batchAction, setBatchAction] = useState<BatchActionState>("");
+  const [isEstimatingCost, setIsEstimatingCost] = useState(false);
+  const [costEstimate, setCostEstimate] = useState<CostEstimateResult | null>(null);
 
   const currentBackendModels = backendModels[backendKind];
   const models = currentBackendModels.models;
@@ -323,6 +402,7 @@ export default function App(): JSX.Element {
       setRetries(parsed.retries);
       setQualitySettings(sanitizeQualitySettings(parsed.qualitySettings));
       setOllamaSettings(sanitizeOllamaSettings(parsed.ollamaSettings));
+      setTokenCostSettings(sanitizeTokenCostSettings(parsed.tokenCostSettings));
       if (
         parsed.promptConfig?.textFilterSystem &&
         parsed.promptConfig?.visionSystem
@@ -359,6 +439,7 @@ export default function App(): JSX.Element {
       promptConfig,
       qualitySettings,
       ollamaSettings,
+      tokenCostSettings,
     };
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(payload));
   }, [
@@ -372,6 +453,7 @@ export default function App(): JSX.Element {
     promptConfig,
     qualitySettings,
     ollamaSettings,
+    tokenCostSettings,
   ]);
 
   useEffect(() => {
@@ -687,6 +769,64 @@ export default function App(): JSX.Element {
       appendLog("error", `Failed to cancel batch: ${message}`);
     } finally {
       setBatchAction("");
+    }
+  }
+
+  async function handleEstimateCost(): Promise<void> {
+    if (!activeModel) {
+      appendLog(
+        "error",
+        "Select a model from the dropdown or provide a manual model ID before estimating cost.",
+      );
+      return;
+    }
+    if (files.length === 0) {
+      appendLog("error", "Add at least one PDF before estimating cost.");
+      return;
+    }
+
+    setLogs([]);
+    setProgress({
+      totalPdfs: files.length,
+      completedPdfs: 0,
+      currentPdf: "",
+      currentPage: 0,
+      totalPagesForCurrent: 0,
+    });
+    setIsEstimatingCost(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const estimate = await estimateExtractionCost({
+        model: activeModel,
+        files,
+        prompts: promptConfig,
+        quality: qualitySettings,
+        fileConcurrency: concurrency,
+        cost: tokenCostSettings,
+        signal: controller.signal,
+        onLog: appendLog,
+        onProgress: setProgress,
+      });
+      setCostEstimate(estimate);
+      appendLog(
+        "info",
+        `Estimated ${estimate.requestCount} request(s), ${estimate.inputTokens.toLocaleString()} input tokens, ${estimate.outputTokens.toLocaleString()} output tokens, estimated cost $${estimate.estimatedCostUsd.toFixed(4)}.`,
+      );
+      estimate.warnings.forEach((warning) => appendLog("warning", warning));
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        appendLog("warning", "Cost estimation canceled by user.");
+      } else {
+        const message =
+          error instanceof Error ? error.message : "Unknown estimation error";
+        appendLog("error", `Cost estimation failed: ${message}`);
+      }
+    } finally {
+      setIsEstimatingCost(false);
+      setProgress(null);
+      abortRef.current = null;
     }
   }
 
@@ -1191,6 +1331,7 @@ export default function App(): JSX.Element {
               onClick={handleRun}
               disabled={
                 isRunning ||
+                isEstimatingCost ||
                 isBatchActionRunning ||
                 files.length === 0 ||
                 !baseUrl.trim()
@@ -1198,9 +1339,203 @@ export default function App(): JSX.Element {
             >
               {isBatchMode ? "Submit Batch" : "Run Extraction"}
             </button>
-            <button type="button" onClick={handleCancel} disabled={!isRunning}>
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={!isRunning && !isEstimatingCost}
+            >
               Cancel
             </button>
+          </div>
+
+          <div className="subpanel">
+            <h3>Token + Cost Estimate (tiktoken)</h3>
+            <p className="muted">
+              Enter model pricing in USD per 1M tokens, then estimate before running.
+            </p>
+            <div className="split">
+              <label className="field">
+                <span>Input price / 1M tokens (USD)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.0001}
+                  value={tokenCostSettings.inputPricePer1M}
+                  onChange={(event) =>
+                    setTokenCostSettings((previous) =>
+                      sanitizeTokenCostSettings({
+                        ...previous,
+                        inputPricePer1M: toNumber(
+                          event.target.value,
+                          previous.inputPricePer1M,
+                        ),
+                      }),
+                    )
+                  }
+                  disabled={isRunning || isEstimatingCost}
+                />
+              </label>
+              <label className="field">
+                <span>Output price / 1M tokens (USD)</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.0001}
+                  value={tokenCostSettings.outputPricePer1M}
+                  onChange={(event) =>
+                    setTokenCostSettings((previous) =>
+                      sanitizeTokenCostSettings({
+                        ...previous,
+                        outputPricePer1M: toNumber(
+                          event.target.value,
+                          previous.outputPricePer1M,
+                        ),
+                      }),
+                    )
+                  }
+                  disabled={isRunning || isEstimatingCost}
+                />
+              </label>
+              <label className="field">
+                <span>Estimated output tokens per request</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={tokenCostSettings.estimatedOutputTokensPerRequest}
+                  onChange={(event) =>
+                    setTokenCostSettings((previous) =>
+                      sanitizeTokenCostSettings({
+                        ...previous,
+                        estimatedOutputTokensPerRequest: toNumber(
+                          event.target.value,
+                          previous.estimatedOutputTokensPerRequest,
+                        ),
+                      }),
+                    )
+                  }
+                  disabled={isRunning || isEstimatingCost}
+                />
+              </label>
+              <label className="field">
+                <span>Estimated vision image tokens per page</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={tokenCostSettings.estimatedVisionImageTokens}
+                  onChange={(event) =>
+                    setTokenCostSettings((previous) =>
+                      sanitizeTokenCostSettings({
+                        ...previous,
+                        estimatedVisionImageTokens: toNumber(
+                          event.target.value,
+                          previous.estimatedVisionImageTokens,
+                        ),
+                      }),
+                    )
+                  }
+                  disabled={isRunning || isEstimatingCost}
+                />
+              </label>
+            </div>
+
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={tokenCostSettings.applyBatchDiscount}
+                onChange={(event) =>
+                  setTokenCostSettings((previous) =>
+                    sanitizeTokenCostSettings({
+                      ...previous,
+                      applyBatchDiscount: event.target.checked,
+                    }),
+                  )
+                }
+                disabled={isRunning || isEstimatingCost}
+              />
+              <span>Apply batch discount</span>
+            </label>
+
+            <label className="field">
+              <span>Batch discount (%)</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={tokenCostSettings.batchDiscountPercent}
+                onChange={(event) =>
+                  setTokenCostSettings((previous) =>
+                    sanitizeTokenCostSettings({
+                      ...previous,
+                      batchDiscountPercent: toNumber(
+                        event.target.value,
+                        previous.batchDiscountPercent,
+                      ),
+                    }),
+                  )
+                }
+                disabled={
+                  isRunning ||
+                  isEstimatingCost ||
+                  !tokenCostSettings.applyBatchDiscount
+                }
+              />
+            </label>
+
+            <div className="inline-actions">
+              <button
+                type="button"
+                onClick={handleEstimateCost}
+                disabled={
+                  isRunning ||
+                  isEstimatingCost ||
+                  files.length === 0 ||
+                  !activeModel
+                }
+              >
+                {isEstimatingCost ? "Estimating..." : "Estimate Tokens + Cost"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTokenCostSettings(DEFAULT_TOKEN_COST_SETTINGS);
+                  setCostEstimate(null);
+                }}
+                disabled={isRunning || isEstimatingCost}
+              >
+                Reset Estimate Defaults
+              </button>
+            </div>
+
+            {costEstimate && (
+              <>
+                <p className="muted">
+                  Requests: {costEstimate.requestCount} ({costEstimate.textRequestCount} text,{" "}
+                  {costEstimate.visionRequestCount} vision)
+                </p>
+                <p className="muted">
+                  Input tokens: {costEstimate.inputTokens.toLocaleString()} | Output tokens
+                  (estimated): {costEstimate.outputTokens.toLocaleString()}
+                </p>
+                <p className="muted">
+                  Total tokens (estimated): {costEstimate.estimatedTotalTokens.toLocaleString()}
+                </p>
+                <p className="muted">
+                  Estimated cost: <strong>${costEstimate.estimatedCostUsd.toFixed(4)}</strong>
+                  {costEstimate.discountMultiplier < 1 && (
+                    <span>
+                      {" "}
+                      (after {(100 - costEstimate.discountMultiplier * 100).toFixed(0)}% discount)
+                    </span>
+                  )}
+                </p>
+                <p className="muted">
+                  Tokenizer: {costEstimate.usedTiktoken ? "tiktoken" : "fallback estimate"}
+                </p>
+              </>
+            )}
           </div>
 
           {isBatchMode && (

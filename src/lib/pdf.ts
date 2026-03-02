@@ -1,5 +1,6 @@
 import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
 import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import type { PDFPageProxy } from "pdfjs-dist/types/src/display/api";
 import type { ParagraphCandidate, ParsedPdf } from "../types";
 
 GlobalWorkerOptions.workerSrc = workerSrc;
@@ -234,14 +235,7 @@ function removeGlobalRepeats(
 }
 
 async function renderPageAsJpegDataUrl(
-  page: {
-    getViewport: (params: { scale: number }) => { width: number; height: number };
-    render: (params: {
-      canvasContext: CanvasRenderingContext2D;
-      viewport: unknown;
-      intent?: "display";
-    }) => { promise: Promise<void> };
-  },
+  page: PDFPageProxy,
   maxDimension = 2300,
 ): Promise<string> {
   const baseViewport = page.getViewport({ scale: 1 });
@@ -281,7 +275,14 @@ export async function extractPdfCandidates(
       throwIfAborted(signal);
       const page = await pdf.getPage(pageNumber);
       const textContent = await page.getTextContent();
-      const rawItems = textContent.items.filter(isRawTextItem);
+      const rawItems: RawTextItem[] = [];
+      for (const item of textContent.items) {
+        if (!isRawTextItem(item)) continue;
+        rawItems.push({
+          str: item.str,
+          transform: item.transform,
+        });
+      }
       if (rawItems.length === 0) {
         pagesWithoutTextLayer += 1;
         onPageProgress?.(pageNumber, totalPages);
