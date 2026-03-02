@@ -1,3 +1,8 @@
 node_modules/
 .DS_Store
 **/.DS_Store
+
+# Local working data and generated outputs
+data/
+*.csv
+*.xlsx
