@@ -136,14 +136,14 @@ In `2) Add PDFs and Run`, use `Token + Cost Estimate (tiktoken)`:
 
 - Enter `Input price / 1M tokens (USD)` and `Output price / 1M tokens (USD)` from your provider pricing page.
 - Set `Estimated output tokens per request`.
-- Set `Estimated vision image tokens per page` for scanned/image-only PDFs.
+- Set `Fallback vision tokens per page` for scanned/image-only PDFs.
 - Optional: apply a batch discount percentage.
 - Click `Estimate Tokens + Cost` before running extraction.
 
 Notes:
 
 - Token estimates are based on planned extraction requests (text-chunk filtering + vision fallback pages).
-- OCR vision image costs are approximate and depend on your image-token assumption.
+- OCR vision image costs are estimated from actual rendered page dimensions, with fallback to your per-page value when needed.
 - The estimator loads `js-tiktoken` at runtime from an ESM CDN; if unavailable, it falls back to rough token estimation.
 
 ## Output Columns

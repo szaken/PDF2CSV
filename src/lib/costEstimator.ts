@@ -1,5 +1,5 @@
 import { mapWithConcurrency } from "./concurrency";
-import { extractPdfCandidates } from "./pdf";
+import { extractPdfCandidates, iteratePdfPageImages } from "./pdf";
 import { DEFAULT_PROMPT_CONFIG } from "./prompts";
 import { sanitizeQualitySettings } from "./settings";
 import type {
@@ -11,7 +11,11 @@ import type {
 
 interface ChatMessage {
   role: "system" | "user";
-  content: string | Array<{ type: "text"; text: string } | { type: "image_url" }>;
+  content:
+    | string
+    | Array<
+        { type: "text"; text: string } | { type: "image_url"; image_url?: { url?: string } }
+      >;
 }
 
 interface TokenEncoder {
@@ -163,10 +167,9 @@ function chooseEncoder(tiktoken: TiktokenModule, model: string): TokenEncoder {
   }
 }
 
-function countMessageTokens(
+function countMessageTextTokens(
   message: ChatMessage,
   encodeText: (text: string) => number,
-  estimatedVisionImageTokens: number,
 ): number {
   let total = 4 + encodeText(message.role);
   if (typeof message.content === "string") {
@@ -177,28 +180,87 @@ function countMessageTokens(
   for (const part of message.content) {
     if (part.type === "text") {
       total += encodeText(part.text);
-      continue;
     }
-    total += estimatedVisionImageTokens;
   }
 
   return total;
 }
 
-function countChatRequestTokens(
+function countChatRequestTextTokens(
   messages: ChatMessage[],
   encodeText: (text: string) => number,
-  estimatedVisionImageTokens: number,
 ): number {
   let total = 3;
   for (const message of messages) {
-    total += countMessageTokens(
-      message,
-      encodeText,
-      estimatedVisionImageTokens,
-    );
+    total += countMessageTextTokens(message, encodeText);
   }
   return total + 3;
+}
+
+function estimateVisionImageTokensByDimensions(
+  width: number,
+  height: number,
+): number {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return 0;
+  }
+
+  let scaledWidth = width;
+  let scaledHeight = height;
+
+  const maxSide = 2048;
+  const largestSide = Math.max(scaledWidth, scaledHeight);
+  if (largestSide > maxSide) {
+    const downscale = maxSide / largestSide;
+    scaledWidth *= downscale;
+    scaledHeight *= downscale;
+  }
+
+  const minSide = Math.min(scaledWidth, scaledHeight);
+  if (minSide > 768) {
+    const downscale = 768 / minSide;
+    scaledWidth *= downscale;
+    scaledHeight *= downscale;
+  }
+
+  const tilesX = Math.max(1, Math.ceil(scaledWidth / 512));
+  const tilesY = Math.max(1, Math.ceil(scaledHeight / 512));
+  const tileCount = tilesX * tilesY;
+
+  const baseTokens = 85;
+  const tokensPerTile = 170;
+  return baseTokens + tileCount * tokensPerTile;
+}
+
+async function getImageDimensions(dataUrl: string): Promise<{ width: number; height: number }> {
+  return await new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      resolve({
+        width: image.naturalWidth || image.width,
+        height: image.naturalHeight || image.height,
+      });
+    };
+    image.onerror = () => reject(new Error("Could not decode rendered page image."));
+    image.src = dataUrl;
+  });
+}
+
+async function estimateVisionImageTokensFromDataUrl(
+  imageDataUrl: string,
+  fallbackTokensPerPage: number,
+): Promise<number> {
+  try {
+    const { width, height } = await getImageDimensions(imageDataUrl);
+    const estimated = estimateVisionImageTokensByDimensions(width, height);
+    if (estimated > 0) {
+      return estimated;
+    }
+  } catch {
+    // Fall through to configured fallback.
+  }
+
+  return Math.max(0, Math.round(fallbackTokensPerPage));
 }
 
 function buildTextFilterMessages(
@@ -234,6 +296,7 @@ function buildVisionMessages(
   quality: ExtractionQualitySettings,
   pdfName: string,
   pageNumber: number,
+  imageDataUrl: string,
 ): ChatMessage[] {
   const userText = [
     `Document: ${pdfName}`,
@@ -250,7 +313,10 @@ function buildVisionMessages(
     { role: "system", content: visionSystemPrompt },
     {
       role: "user",
-      content: [{ type: "text", text: userText }, { type: "image_url" }],
+      content: [
+        { type: "text", text: userText },
+        { type: "image_url", image_url: { url: imageDataUrl } },
+      ],
     },
   ];
 }
@@ -280,10 +346,7 @@ export async function estimateExtractionCost(
     );
   }
 
-  const estimatedVisionImageTokens = Math.max(
-    0,
-    Math.round(options.cost.estimatedVisionImageTokens),
-  );
+  const estimatedVisionImageTokens = Math.max(0, Math.round(options.cost.estimatedVisionImageTokens));
 
   let completedPdfs = 0;
   const files = await mapWithConcurrency(
@@ -308,20 +371,51 @@ export async function estimateExtractionCost(
         );
 
         if (parsed.paragraphs.length === 0) {
-          const visionRequests = parsed.totalPages;
+          let visionRequests = 0;
           let visionInputTokens = 0;
-          for (let page = 1; page <= parsed.totalPages; page += 1) {
-            const messages = buildVisionMessages(
-              visionSystemPrompt,
-              quality,
-              file.name,
-              page,
-            );
-            visionInputTokens += countChatRequestTokens(
-              messages,
-              encodeText,
-              estimatedVisionImageTokens,
-            );
+
+          await iteratePdfPageImages(
+            file,
+            async ({ pageNumber, totalPages, imageDataUrl }) => {
+              options.onProgress?.({
+                totalPdfs: options.files.length,
+                completedPdfs,
+                currentPdf: file.name,
+                currentPage: pageNumber,
+                totalPagesForCurrent: totalPages,
+              });
+
+              const messages = buildVisionMessages(
+                visionSystemPrompt,
+                quality,
+                file.name,
+                pageNumber,
+                imageDataUrl,
+              );
+              const textTokens = countChatRequestTextTokens(messages, encodeText);
+              const imageTokens = await estimateVisionImageTokensFromDataUrl(
+                imageDataUrl,
+                estimatedVisionImageTokens,
+              );
+              visionInputTokens += textTokens + imageTokens;
+              visionRequests += 1;
+            },
+            options.signal,
+          );
+
+          if (visionRequests === 0 && parsed.totalPages > 0) {
+            for (let page = 1; page <= parsed.totalPages; page += 1) {
+              const messages = buildVisionMessages(
+                visionSystemPrompt,
+                quality,
+                file.name,
+                page,
+                "",
+              );
+              const textTokens = countChatRequestTextTokens(messages, encodeText);
+              visionInputTokens += textTokens + estimatedVisionImageTokens;
+              visionRequests += 1;
+            }
           }
 
           return {
@@ -340,11 +434,7 @@ export async function estimateExtractionCost(
             quality,
             chunk,
           );
-          textInputTokens += countChatRequestTokens(
-            messages,
-            encodeText,
-            estimatedVisionImageTokens,
-          );
+          textInputTokens += countChatRequestTextTokens(messages, encodeText);
         }
 
         return {
@@ -397,7 +487,7 @@ export async function estimateExtractionCost(
   }
   if (visionRequestCount > 0) {
     warnings.push(
-      "Vision pricing is approximated using your per-image token estimate.",
+      "Vision token estimate uses actual rendered page dimensions with fallback to your per-page value when needed.",
     );
   }
 

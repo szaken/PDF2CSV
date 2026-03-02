@@ -1418,7 +1418,7 @@ export default function App(): JSX.Element {
                 />
               </label>
               <label className="field">
-                <span>Estimated vision image tokens per page</span>
+                <span>Fallback vision tokens per page</span>
                 <input
                   type="number"
                   min={0}
