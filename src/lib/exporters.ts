@@ -3,6 +3,7 @@ import type { ExtractionRow } from "../types";
 
 const EXPORT_COLUMNS: Array<keyof ExtractionRow> = [
   "pdf_name",
+  "url",
   "paragraph",
   "paragraph_index",
   "page_number",

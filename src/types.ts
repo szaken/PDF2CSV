@@ -19,6 +19,7 @@ export interface LogEntry {
 
 export interface ExtractionRow {
   pdf_name: string;
+  url: string;
   paragraph: string;
   paragraph_index: number;
   page_number: number | null;
@@ -43,6 +44,7 @@ export interface ParsedPdf {
 
 export interface KeepDecision {
   id: string;
+  url?: string;
   section_heading?: string;
   note?: string;
   confidence?: number;

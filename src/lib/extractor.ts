@@ -29,6 +29,7 @@ interface ExtractionCallbacks {
 
 interface VisionParagraphDecision {
   text: string;
+  url?: string;
   section_heading?: string;
   note?: string;
   confidence?: number;
@@ -130,6 +131,7 @@ const TEXT_FILTER_TOOL: NativeToolDefinition = {
           type: "object",
           properties: {
             id: { type: "string" },
+            url: { type: "string" },
             possible_boilerplate: { type: "boolean" },
             section_heading: { type: "string" },
             note: { type: "string" },
@@ -160,6 +162,7 @@ const VISION_PAGE_TOOL: NativeToolDefinition = {
           type: "object",
           properties: {
             text: { type: "string" },
+            url: { type: "string" },
             section_heading: { type: "string" },
             note: { type: "string" },
             possible_boilerplate: { type: "boolean" },
@@ -264,6 +267,14 @@ function clampConfidence(value: unknown): number | undefined {
     return undefined;
   }
   return Math.max(0, Math.min(1, value));
+}
+
+function normalizeUrl(value: unknown): string {
+  if (typeof value !== "string") {
+    return "not found";
+  }
+  const trimmed = value.trim();
+  return trimmed || "not found";
 }
 
 function buildVisionRequestMessages(
@@ -398,6 +409,7 @@ function normalizeDecision(raw: unknown): ChunkDecision {
     }
     keep.push({
       id: record.id,
+      url: normalizeUrl(record.url),
       section_heading:
         typeof record.section_heading === "string"
           ? record.section_heading.trim()
@@ -435,6 +447,7 @@ function normalizeVisionDecision(raw: unknown): VisionPageDecision {
     }
     paragraphs.push({
       text,
+      url: normalizeUrl(record.url),
       section_heading:
         typeof record.section_heading === "string"
           ? record.section_heading.trim()
@@ -531,6 +544,7 @@ function fallbackRowsFromChunk(
 ): ExtractionRow[] {
   return chunk.map((paragraph) => ({
     pdf_name: pdfName,
+    url: "not found",
     paragraph: paragraph.text,
     paragraph_index: 0,
     page_number: paragraph.pageNumber,
@@ -616,6 +630,7 @@ async function processPdfWithVisionFallback(
 
           rows.push({
             pdf_name: file.name,
+            url: paragraph.url ?? "not found",
             paragraph: paragraph.text,
             paragraph_index: 0,
             page_number: pageNumber,
@@ -636,6 +651,7 @@ async function processPdfWithVisionFallback(
         );
         rows.push({
           pdf_name: file.name,
+          url: "not found",
           paragraph: "",
           paragraph_index: 0,
           page_number: pageNumber,
@@ -651,6 +667,7 @@ async function processPdfWithVisionFallback(
   if (rows.length === 0) {
     rows.push({
       pdf_name: file.name,
+      url: "not found",
       paragraph: "",
       paragraph_index: 0,
       page_number: null,
@@ -765,6 +782,7 @@ async function processSinglePdf(
 
         rows.push({
           pdf_name: parsed.pdfName,
+          url: keep.url ?? "not found",
           paragraph: candidate.text,
           paragraph_index: 0,
           page_number: candidate.pageNumber,
@@ -1113,6 +1131,7 @@ export function importOpenAiBatchResultFiles(
 
           pushRow(task.pdfName, {
             pdf_name: task.pdfName,
+            url: keep.url ?? "not found",
             paragraph: candidate.text,
             paragraph_index: 0,
             page_number: candidate.pageNumber,
@@ -1169,6 +1188,7 @@ export function importOpenAiBatchResultFiles(
 
         pushRow(task.pdfName, {
           pdf_name: task.pdfName,
+          url: paragraph.url ?? "not found",
           paragraph: paragraph.text,
           paragraph_index: 0,
           page_number: task.pageNumber,
@@ -1198,6 +1218,7 @@ export function importOpenAiBatchResultFiles(
       );
       pushRow(task.pdfName, {
         pdf_name: task.pdfName,
+        url: "not found",
         paragraph: "",
         paragraph_index: 0,
         page_number: task.pageNumber,
@@ -1216,6 +1237,7 @@ export function importOpenAiBatchResultFiles(
     if (filePlan.mode === "vision" && rows.length === 0) {
       rows.push({
         pdf_name: filePlan.pdfName,
+        url: "not found",
         paragraph: "",
         paragraph_index: 0,
         page_number: null,
@@ -1276,6 +1298,7 @@ export async function runExtraction(
         return [
           {
             pdf_name: file.name,
+            url: "not found",
             paragraph: "",
             paragraph_index: 1,
             page_number: null,

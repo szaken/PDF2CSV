@@ -1624,8 +1624,8 @@ export default function App(): JSX.Element {
         <section className="panel">
           <h2>3) Download Results</h2>
           <p className="muted">
-            Output columns: <code>pdf_name</code>, <code>paragraph</code>,
-            <code> paragraph_index</code>, <code>page_number</code>,
+            Output columns: <code>pdf_name</code>, <code>url</code>,
+            <code> paragraph</code>, <code>paragraph_index</code>, <code>page_number</code>,
             <code> section_heading</code>, <code>notes</code>,{" "}
             <code>confidence</code>.
           </p>
